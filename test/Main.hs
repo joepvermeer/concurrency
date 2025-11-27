@@ -32,7 +32,19 @@ main = defaultMain
   [ localOption (NumThreads 1)                            -- run each test sequentially with many cores
   $ localOption (mkTimeout 20_000_000)                    -- timeout each test after 20 s
   $ testGroup "test"
-      [ testGroup "count"
+      [ testGroup "m-test"
+          [ testCase "Voorbeeld (274856190, m=11) → True" $
+              assertBool "expected True" (IBAN.mtest 11 274856190)
+          , testCase "Nabij voorbeeld (274856191, m=11) → False" $
+              assertBool "expected False" (not (IBAN.mtest 11 274856191))
+          , testCase "Voorbeeld m=12: 374856173 → True" $
+              assertBool "expected True" (IBAN.mtest 12 374856173)
+          , testCase "Voorbeeld m=12: 374856238 → True" $
+              assertBool "expected True" (IBAN.mtest 12 374856238)
+          , testCase "Edge: 0 mod m == 0" $
+              assertBool "expected True" (IBAN.mtest 7 0)
+          ]
+      , testGroup "count"
         [ test_count 1 (Config 139483  928234   11 1) 71705
         , test_count 1 (Config 2824374 25823728 24 1) 958317
         , test_count 5 (Config 2824374 25823728 24 2) 958317
