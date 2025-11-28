@@ -61,7 +61,7 @@ count config = do
 
   totalRef <- newIORef 0
 
-  -- Start p threads 
+  -- Start p threads, lokale telling uit eigen subrange 
   forkThreads p $ \i -> do
     let (start, len) = rangeFor b e p i
         local = countRange m start len
@@ -110,21 +110,133 @@ casAdd ref delta = do
 -- 2. List mode (3pt)
 -- -----------------------------------------------------------------------------
 
+-- loop weer door bereik heen b tot e 
+-- print sequenceNumber en accountNumber voor gehaalde m tests
+-- meerdere threads tegelijk op verschillende delen van bereik 
+-- sequence number oplopend op volgorde van verschijnen in output 
+-- synchoniseren met MVars 
+
 list :: Handle -> Config -> IO ()
 list handle config = do
-  -- Implement list mode here!
-  -- Remember to use "hPutStrLn handle" to write your output.
-  undefined
+  let b = cfgLower   config
+      e = cfgUpper   config
+      m = cfgModulus config
+      p = cfgThreads config
+
+  seqVar <- newMVar 0   -- global sequence teller
+  forkThreads p $ \i -> do
+    let (start, len) = rangeFor b e p i
+        end          = start + len
+    -- Loop over alle mogelijke waarden in  subrange
+    let loop x 
+          | x >= end  = return ()
+          | otherwise = do
+              if mtest m x
+                then do
+                  -- krietieke sectie, dus MVar gebruiken 
+                  -- pak teller, verhoog met 1, print regel, zet terug
+                  n <- takeMVar seqVar
+                  let n' = n + 1
+                  hPutStrLn handle (show n' ++ " " ++ show x)
+                  putMVar seqVar n'
+                  loop (x+1)
+                else loop (x+1)
+    loop start
+
+  return ()  -- niets terug geven output staat in handle
 
 
 -- -----------------------------------------------------------------------------
 -- 3. Search mode (4pt)
 -- -----------------------------------------------------------------------------
+-- zoek naar eerste bankrekeningnummer in bereik b tot e dat voldoet aan m-test
+-- en waarvan SHA1 hash gelijk is aan gegeven query
+-- p threads tegelijk op verschillende delen van bereik
+-- zodra een thread een match vindt, moeten alle threads stoppen
+-- resultaat is het gevonden bankrekeningnummer of Nothing als niets is gevonden. gebruik stop-flag en MVar voor resultaat 
+
+
+type Job = (Int, Int)  -- (start,end)
+
+
+-- maak vaste blokken van b e chunk grootte -> elke job is (start,end)
+mkJobs :: Int -> Int -> Int -> [Job]
+mkJobs b e chunk =
+  let go s acc
+        | s >= e    = reverse acc
+        | otherwise =
+            let end = min e (s + chunk)
+            in go end ((s,end):acc)
+  in go b []
+
+
+--true als x m-test haalt en SHA1(show x) == query
+candidateMatches :: Int -> ByteString -> Int -> Bool
+candidateMatches m query x = mtest m x && checkHash query (show x)
+
+
+-- zet stop flag en geef gevonden waarde door in MVar
+publishFound :: IORef Bool -> MVar (Maybe Int) -> Int -> IO ()
+publishFound stopFlag foundVar x = do
+  writeIORef stopFlag True
+  cur <- takeMVar foundVar
+  case cur of
+    Nothing -> putMVar foundVar (Just x)
+    Just v  -> putMVar foundVar (Just v)
+
 
 search :: Config -> ByteString -> IO (Maybe Int)
 search config query = do
-  -- Implement search mode here!
-  undefined
+  let b = cfgLower   config
+      e = cfgUpper   config
+      m = cfgModulus config
+      p = cfgThreads config
+
+  let chunkSize = 2048
+      jobs0     = mkJobs b e chunkSize
+
+  queueVar <- newMVar jobs0 -- MVar [Job]
+  foundVar <- newMVar Nothing -- MVar (Maybe Int)
+  stopFlag <- newIORef False  -- IORef Bool
+
+
+-- haal een job van de queue of Nothing als leeg
+  let dequeueJob :: IO (Maybe Job)
+      dequeueJob = do
+        jobs <- takeMVar queueVar
+        case jobs of
+          []       -> putMVar queueVar [] >> return Nothing
+          (j:rest) -> putMVar queueVar rest >> return (Just j)
+
+      -- doorloop kandidaten van job, stop bij gevonden of einde
+      processJob :: Job -> IO ()
+      processJob (s,end) =
+        let loop x
+              | x >= end = return ()
+              | otherwise = do
+                  stopped <- readIORef stopFlag
+                  if stopped
+                    then return ()
+                    else if candidateMatches m query x
+                      then publishFound stopFlag foundVar x
+                      else loop (x+1)
+        in loop s
+      -- pak jobs en verwerk-> stop bij stop-flag of lege queue
+      worker :: Int -> IO ()
+      worker _ = do
+        stopped <- readIORef stopFlag
+        if stopped
+          then return ()
+          else do
+            mjob <- dequeueJob
+            case mjob of
+              Nothing  -> return ()
+              Just job -> processJob job >> worker 0
+
+  forkThreads p worker
+
+  -- resultaat teruggeven, blokkeer tot gevonden of alle threads klaar 
+  takeMVar foundVar
 
 
 -- -----------------------------------------------------------------------------
